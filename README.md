@@ -23,6 +23,12 @@ Estado:
 GET /api/v1/health.php
 ```
 
+Estado del contenedor utilizado por Railway:
+
+```http
+GET /healthz.php
+```
+
 Informacion financiera por cedula:
 
 ```http
