@@ -35,78 +35,91 @@ if ($originId === $destinationId) {
 }
 
 try {
-    $conn->beginTransaction();
-
     $statement = $conn->prepare(
-        'SELECT id_cuenta, saldo FROM cuentas
-         WHERE id_cuenta IN (:origin_id, :destination_id)
-           AND estado = :status
-         ORDER BY id_cuenta
-         FOR UPDATE'
+        'WITH debited AS (
+            UPDATE cuentas
+            SET saldo = saldo - :debit_amount
+            WHERE id_cuenta = :origin_id
+              AND estado = :origin_status
+              AND saldo >= :minimum_balance
+              AND EXISTS (
+                  SELECT 1 FROM cuentas destination
+                  WHERE destination.id_cuenta = :destination_check_id
+                    AND destination.estado = :destination_check_status
+              )
+            RETURNING id_cuenta
+         ),
+         credited AS (
+            UPDATE cuentas
+            SET saldo = saldo + :credit_amount
+            WHERE id_cuenta = :destination_id
+              AND estado = :destination_status
+              AND EXISTS (SELECT 1 FROM debited)
+            RETURNING id_cuenta
+         ),
+         outgoing AS (
+            INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
+            SELECT id_cuenta, :outgoing_type, :outgoing_amount, :outgoing_date
+            FROM debited
+            WHERE EXISTS (SELECT 1 FROM credited)
+            RETURNING id_transaccion
+         ),
+         incoming AS (
+            INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
+            SELECT id_cuenta, :incoming_type, :incoming_amount, :incoming_date
+            FROM credited
+            WHERE EXISTS (SELECT 1 FROM outgoing)
+            RETURNING id_transaccion
+         )
+         SELECT
+            (SELECT COUNT(*) FROM debited) AS debited_count,
+            (SELECT COUNT(*) FROM credited) AS credited_count,
+            (SELECT COUNT(*) FROM outgoing) AS outgoing_count,
+            (SELECT COUNT(*) FROM incoming) AS incoming_count'
     );
     $statement->execute([
+        'debit_amount' => $amount,
         'origin_id' => $originId,
+        'origin_status' => 'Activa',
+        'minimum_balance' => $amount,
+        'destination_check_id' => $destinationId,
+        'destination_check_status' => 'Activa',
+        'credit_amount' => $amount,
         'destination_id' => $destinationId,
-        'status' => 'Activa',
+        'destination_status' => 'Activa',
+        'outgoing_type' => 'Transferencia Enviada',
+        'outgoing_amount' => $amount,
+        'outgoing_date' => $date,
+        'incoming_type' => 'Transferencia Recibida',
+        'incoming_amount' => $amount,
+        'incoming_date' => $date,
     ]);
-    $accounts = $statement->fetchAll();
-
-    if (count($accounts) !== 2) {
-        throw new DomainException('cuenta_invalida');
-    }
-
-    $originBalance = null;
-    foreach ($accounts as $account) {
-        if ((int) $account['id_cuenta'] === $originId) {
-            $originBalance = (float) $account['saldo'];
-            break;
+    $result = $statement->fetch();
+    if (
+        !$result ||
+        (int) $result['debited_count'] !== 1 ||
+        (int) $result['credited_count'] !== 1 ||
+        (int) $result['outgoing_count'] !== 1 ||
+        (int) $result['incoming_count'] !== 1
+    ) {
+        $accountCheck = $conn->prepare(
+            'SELECT id_cuenta, saldo FROM cuentas
+             WHERE id_cuenta IN (:origin_id, :destination_id)
+               AND estado = :status'
+        );
+        $accountCheck->execute([
+            'origin_id' => $originId,
+            'destination_id' => $destinationId,
+            'status' => 'Activa',
+        ]);
+        $accounts = $accountCheck->fetchAll();
+        if (count($accounts) !== 2) {
+            throw new DomainException('cuenta_invalida');
         }
-    }
-    if ($originBalance === null || $originBalance < $amount) {
         throw new DomainException('saldo_insuficiente');
     }
-
-    $insert = $conn->prepare(
-        'INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
-         VALUES (:account_id, :type, :amount, :transaction_date)'
-    );
-    $insert->execute([
-        'account_id' => $originId,
-        'type' => 'Transferencia Enviada',
-        'amount' => $amount,
-        'transaction_date' => $date,
-    ]);
-    $insert->execute([
-        'account_id' => $destinationId,
-        'type' => 'Transferencia Recibida',
-        'amount' => $amount,
-        'transaction_date' => $date,
-    ]);
-
-    $debit = $conn->prepare(
-        'UPDATE cuentas SET saldo = saldo - :amount
-         WHERE id_cuenta = :account_id'
-    );
-    $debit->execute([
-        'amount' => $amount,
-        'account_id' => $originId,
-    ]);
-
-    $credit = $conn->prepare(
-        'UPDATE cuentas SET saldo = saldo + :amount
-         WHERE id_cuenta = :account_id'
-    );
-    $credit->execute([
-        'amount' => $amount,
-        'account_id' => $destinationId,
-    ]);
-
-    $conn->commit();
     redirect_transferencia('ok');
 } catch (Throwable $exception) {
-    if ($conn->inTransaction()) {
-        $conn->rollBack();
-    }
     error_log(
         'Banco 3 transferencia failed [' .
         get_class($exception) .
