@@ -91,6 +91,12 @@ function db_query(PDO $connection, string $sql)
         return true;
     } catch (PDOException $exception) {
         $db_last_error = $exception->getMessage();
+        error_log(
+            'Banco 3 query failed [' .
+            $exception->getCode() .
+            ']: ' .
+            $exception->getMessage()
+        );
         return false;
     }
 }

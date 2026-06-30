@@ -1,119 +1,119 @@
 <?php
 
-include("conexion.php");
+require_once __DIR__ . '/conexion.php';
 
-if($_SERVER['REQUEST_METHOD'] == 'POST')
+function redirect_transferencia(string $message): never
 {
-    $id_origen  = $_POST['id_cuenta_origen'];
-    $id_destino = $_POST['id_cuenta_destino'];
-    $monto      = $_POST['monto'];
-    $fecha      = $_POST['fecha'];
-
-    if($monto <= 0)
-    {
-        header("Location: transacciones.php?msg=error");
-        exit();
-    }
-
-    if($id_origen == $id_destino)
-    {
-        header("Location: transacciones.php?msg=misma_cuenta");
-        exit();
-    }
-
-    db_begin_transaction($conn);
-
-    try
-    {
-        $checkSql = "
-        SELECT id_cuenta, saldo
-        FROM cuentas
-        WHERE id_cuenta IN ('$id_origen','$id_destino')
-        FOR UPDATE
-        ";
-        $checkResult = db_query($conn,$checkSql);
-
-        if(db_num_rows($checkResult) < 2)
-        {
-            throw new Exception("cuenta_invalida");
-        }
-
-        $saldoOrigen = null;
-        while($row = db_fetch_assoc($checkResult))
-        {
-            if($row['id_cuenta'] == $id_origen)
-            {
-                $saldoOrigen = $row['saldo'];
-            }
-        }
-
-        if($saldoOrigen === null || $saldoOrigen < $monto)
-        {
-            throw new Exception("saldo_insuficiente");
-        }
-
-        // Registrar salida en cuenta origen
-        $sqlInsertSalida = "
-        INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
-        VALUES ('$id_origen', 'Transferencia Enviada', '$monto', '$fecha')
-        ";
-
-        if(!db_query($conn,$sqlInsertSalida))
-        {
-            throw new Exception("error");
-        }
-
-        // Registrar entrada en cuenta destino
-        $sqlInsertEntrada = "
-        INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
-        VALUES ('$id_destino', 'Transferencia Recibida', '$monto', '$fecha')
-        ";
-
-        if(!db_query($conn,$sqlInsertEntrada))
-        {
-            throw new Exception("error");
-        }
-
-        // Actualizar saldo cuenta origen
-        $sqlUpdateOrigen = "
-        UPDATE cuentas
-        SET saldo = saldo - '$monto'
-        WHERE id_cuenta = '$id_origen'
-        ";
-
-        if(!db_query($conn,$sqlUpdateOrigen))
-        {
-            throw new Exception("error");
-        }
-
-        // Actualizar saldo cuenta destino
-        $sqlUpdateDestino = "
-        UPDATE cuentas
-        SET saldo = saldo + '$monto'
-        WHERE id_cuenta = '$id_destino'
-        ";
-
-        if(!db_query($conn,$sqlUpdateDestino))
-        {
-            throw new Exception("error");
-        }
-
-        db_commit($conn);
-
-        header("Location: transacciones.php?msg=ok");
-        exit();
-    }
-    catch(Exception $e)
-    {
-        db_rollback($conn);
-        header("Location: transacciones.php?msg=" . $e->getMessage());
-        exit();
-    }
-}
-else
-{
-    header("Location: transacciones.php");
-    exit();
+    header('Location: transacciones.php?msg=' . urlencode($message));
+    exit;
 }
 
-?>
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    redirect_transferencia('error');
+}
+
+$originId = filter_var($_POST['id_cuenta_origen'] ?? null, FILTER_VALIDATE_INT);
+$destinationId = filter_var($_POST['id_cuenta_destino'] ?? null, FILTER_VALIDATE_INT);
+$amount = filter_var($_POST['monto'] ?? null, FILTER_VALIDATE_FLOAT);
+$date = trim((string) ($_POST['fecha'] ?? ''));
+$parsedDate = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+
+if (
+    $originId === false ||
+    $destinationId === false ||
+    $originId < 1 ||
+    $destinationId < 1 ||
+    $amount === false ||
+    $amount <= 0 ||
+    !$parsedDate ||
+    $parsedDate->format('Y-m-d') !== $date
+) {
+    redirect_transferencia('error');
+}
+if ($originId === $destinationId) {
+    redirect_transferencia('misma_cuenta');
+}
+
+try {
+    $conn->beginTransaction();
+
+    $statement = $conn->prepare(
+        'SELECT id_cuenta, saldo FROM cuentas
+         WHERE id_cuenta IN (:origin_id, :destination_id)
+           AND estado = :status
+         ORDER BY id_cuenta
+         FOR UPDATE'
+    );
+    $statement->execute([
+        'origin_id' => $originId,
+        'destination_id' => $destinationId,
+        'status' => 'Activa',
+    ]);
+    $accounts = $statement->fetchAll();
+
+    if (count($accounts) !== 2) {
+        throw new DomainException('cuenta_invalida');
+    }
+
+    $originBalance = null;
+    foreach ($accounts as $account) {
+        if ((int) $account['id_cuenta'] === $originId) {
+            $originBalance = (float) $account['saldo'];
+            break;
+        }
+    }
+    if ($originBalance === null || $originBalance < $amount) {
+        throw new DomainException('saldo_insuficiente');
+    }
+
+    $insert = $conn->prepare(
+        'INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
+         VALUES (:account_id, :type, :amount, :transaction_date)'
+    );
+    $insert->execute([
+        'account_id' => $originId,
+        'type' => 'Transferencia Enviada',
+        'amount' => $amount,
+        'transaction_date' => $date,
+    ]);
+    $insert->execute([
+        'account_id' => $destinationId,
+        'type' => 'Transferencia Recibida',
+        'amount' => $amount,
+        'transaction_date' => $date,
+    ]);
+
+    $debit = $conn->prepare(
+        'UPDATE cuentas SET saldo = saldo - :amount
+         WHERE id_cuenta = :account_id'
+    );
+    $debit->execute([
+        'amount' => $amount,
+        'account_id' => $originId,
+    ]);
+
+    $credit = $conn->prepare(
+        'UPDATE cuentas SET saldo = saldo + :amount
+         WHERE id_cuenta = :account_id'
+    );
+    $credit->execute([
+        'amount' => $amount,
+        'account_id' => $destinationId,
+    ]);
+
+    $conn->commit();
+    redirect_transferencia('ok');
+} catch (Throwable $exception) {
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
+    error_log(
+        'Banco 3 transferencia failed [' .
+        get_class($exception) .
+        ']: ' .
+        $exception->getMessage()
+    );
+    redirect_transferencia(
+        $exception instanceof DomainException ? $exception->getMessage() : 'error'
+    );
+}

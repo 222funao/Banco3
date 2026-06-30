@@ -1,68 +1,82 @@
 <?php
 
-include("conexion.php");
+require_once __DIR__ . '/conexion.php';
 
-if($_SERVER['REQUEST_METHOD'] == 'POST')
+function redirect_deposito(string $message): never
 {
-    $id_cuenta = $_POST['id_cuenta'];
-    $monto     = $_POST['monto'];
-    $fecha     = $_POST['fecha'];
-
-    if($monto <= 0)
-    {
-        header("Location: transacciones.php?msg=error");
-        exit();
-    }
-
-    db_begin_transaction($conn);
-
-    try
-    {
-        $checkSql = "SELECT id_cuenta, saldo FROM cuentas WHERE id_cuenta = '$id_cuenta' FOR UPDATE";
-        $checkResult = db_query($conn,$checkSql);
-
-        if(db_num_rows($checkResult) == 0)
-        {
-            throw new Exception("cuenta_invalida");
-        }
-
-        $sqlInsert = "
-        INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
-        VALUES ('$id_cuenta', 'Deposito', '$monto', '$fecha')
-        ";
-
-        if(!db_query($conn,$sqlInsert))
-        {
-            throw new Exception("error");
-        }
-
-        $sqlUpdate = "
-        UPDATE cuentas
-        SET saldo = saldo + '$monto'
-        WHERE id_cuenta = '$id_cuenta'
-        ";
-
-        if(!db_query($conn,$sqlUpdate))
-        {
-            throw new Exception("error");
-        }
-
-        db_commit($conn);
-
-        header("Location: transacciones.php?msg=ok");
-        exit();
-    }
-    catch(Exception $e)
-    {
-        db_rollback($conn);
-        header("Location: transacciones.php?msg=" . $e->getMessage());
-        exit();
-    }
-}
-else
-{
-    header("Location: transacciones.php");
-    exit();
+    header('Location: transacciones.php?msg=' . urlencode($message));
+    exit;
 }
 
-?>
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    redirect_deposito('error');
+}
+
+$accountId = filter_var($_POST['id_cuenta'] ?? null, FILTER_VALIDATE_INT);
+$amount = filter_var($_POST['monto'] ?? null, FILTER_VALIDATE_FLOAT);
+$date = trim((string) ($_POST['fecha'] ?? ''));
+$parsedDate = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+
+if (
+    $accountId === false ||
+    $accountId < 1 ||
+    $amount === false ||
+    $amount <= 0 ||
+    !$parsedDate ||
+    $parsedDate->format('Y-m-d') !== $date
+) {
+    redirect_deposito('error');
+}
+
+try {
+    $conn->beginTransaction();
+
+    $statement = $conn->prepare(
+        'SELECT id_cuenta FROM cuentas
+         WHERE id_cuenta = :account_id AND estado = :status
+         FOR UPDATE'
+    );
+    $statement->execute([
+        'account_id' => $accountId,
+        'status' => 'Activa',
+    ]);
+    if (!$statement->fetch()) {
+        throw new DomainException('cuenta_invalida');
+    }
+
+    $statement = $conn->prepare(
+        'INSERT INTO transacciones (id_cuenta, tipo, monto, fecha)
+         VALUES (:account_id, :type, :amount, :transaction_date)'
+    );
+    $statement->execute([
+        'account_id' => $accountId,
+        'type' => 'Deposito',
+        'amount' => $amount,
+        'transaction_date' => $date,
+    ]);
+
+    $statement = $conn->prepare(
+        'UPDATE cuentas SET saldo = saldo + :amount
+         WHERE id_cuenta = :account_id'
+    );
+    $statement->execute([
+        'amount' => $amount,
+        'account_id' => $accountId,
+    ]);
+
+    $conn->commit();
+    redirect_deposito('ok');
+} catch (Throwable $exception) {
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
+    error_log(
+        'Banco 3 deposito failed [' .
+        get_class($exception) .
+        ']: ' .
+        $exception->getMessage()
+    );
+    redirect_deposito(
+        $exception instanceof DomainException ? $exception->getMessage() : 'error'
+    );
+}
