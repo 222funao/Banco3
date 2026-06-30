@@ -57,6 +57,12 @@ try {
         PDO::ATTR_EMULATE_PREPARES => false,
     ]);
 } catch (PDOException $exception) {
+    error_log(
+        'Banco 3 PostgreSQL connection failed [' .
+        $exception->getCode() .
+        ']: ' .
+        $exception->getMessage()
+    );
     http_response_code(500);
     die('Error de conexion con Banco 3');
 }

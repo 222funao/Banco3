@@ -8,6 +8,10 @@ Aplicacion PHP conectada a PostgreSQL en Neon mediante PDO.
 - Extensiones `pdo` y `pdo_pgsql`.
 - Un servidor web que publique esta carpeta.
 
+En Railway, el `Dockerfile` instala PHP 8.3, Apache y `pdo_pgsql`
+automaticamente. Configura `/Banco 3` como Root Directory y registra las
+variables de `.env` en la pestana Variables del servicio.
+
 La configuracion privada vive en `.env`, que esta excluido de Git. El esquema
 de la base se encuentra en `database_postgresql.sql`.
 
