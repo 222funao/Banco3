@@ -87,6 +87,10 @@ try {
     header('X-Banco3-Transaction-Stage: ' . $stage);
     header('X-Banco3-Transaction-Error: ' . get_class($exception));
     header('X-Banco3-Transaction-Code: ' . $exception->getCode());
+    header(
+        'X-Banco3-Transaction-Detail: ' .
+        base64_encode(substr($exception->getMessage(), 0, 500))
+    );
     redirect_deposito(
         $exception instanceof DomainException ? $exception->getMessage() : 'error'
     );
