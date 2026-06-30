@@ -5,7 +5,8 @@ RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
     && apt-get install -y --no-install-recommends libpq-dev \
     && docker-php-ext-install -j"$(nproc)" pdo_pgsql opcache \
     && rm -rf /var/lib/apt/lists/* \
-    && a2enmod rewrite
+    && (a2dismod mpm_event mpm_worker || true) \
+    && a2enmod mpm_prefork rewrite
 
 WORKDIR /var/www/html
 COPY . /var/www/html
